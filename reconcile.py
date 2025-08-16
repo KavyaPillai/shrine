@@ -1,370 +1,635 @@
-import pandas as pd
-import numpy as np
-from copy import deepcopy
-import math
-import re
+"""
+Transaction Reconciler: Reconcile Paytm, ICICI, and Registration data.
 
-keydb = {}
-paytmdb = {}
+This module provides functionality to match transaction records from
+payment platforms with student registration data based on various
+identifiers like names, mobile numbers, and email addresses.
+"""
+
+import argparse
+import pandas as pd
+import re
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Any
+
+# Global key database for storing registration data
+KEY_DB = {}
 THRESHOLD = 0
 
-class logger:
-  def __init__(self, filename, prefix = "", date = True ):
-    self.filename = filename
-    self.prefix = prefix
-    self.date=""
-    print ("starting ", filename, " log")
+
+class Logger:
+    """Simple logger class for transaction processing."""
     
-  def log(self, message, *vartuple):
-    SEP = "\t"
-    #print(self.prefix)
-    if self.prefix != "":
-      message = str(self.prefix) + SEP + str(message)
-    if self.date:
-      now = datetime.now()
-      dt_string = now.strftime("%Y/%m/%d%H:%M:%S") + SEP + message
-    for token in vartuple:
-      if token != None:
-        message = str(message) + SEP + str(token)
-    #print(message)
-
-
-class registration:
-  def __init__(self, file, headers):
-    print("Code Flow: utils - In init")
-    self.attr=0
-    self.readRegCSVtoTable(file, headers)
-    pass 
-
-  def readRegCSVtoTable(self, fl, headers):
-    print("Code Flow: utils - Reading CSV")
-    data = pd.read_csv(fl, dtype={"SL.NO":str,"STUDENTS NAME":str,"PARENTS NAME":str,"MOBILE NUM":str, "ALTERNATIVE NUM":str, "E.M@IL":str})
-    reg = pd.Series(data["SL.NO"]).tolist()
-    name = pd.Series(data['STUDENTS NAME']).tolist()
-    parent = pd.Series(data["PARENTS NAME"]).tolist()
-    mobile = pd.Series(data["MOBILE NUM"]).tolist()
-    alternate = pd.Series(data["ALTERNATIVE NUM"]).tolist()
-    mail = pd.Series(data["E.M@IL"]).tolist()
-    #operations on series
-    #add, sub, mul, div, sum, prod, mean, pow, abs, cov
-    self.teachNames(reg, name, "")
-    self.teachNames(reg, parent, "P_")
-    self.teachMobiles(reg, mobile)
-    self.teachMobiles(reg, alternate)
-    self.teachEmails(reg, mail)
-
-  def teachMobiles(self, reg, mobiles):
-    for i in range(len(mobiles)):
-      self.teachMobile(reg[i], mobiles[i])
-
-
-  def teachMobile(self, reg_id, mobile):
-    if pd.isna(reg_id) or pd.isna(mobile):
-      return
-#    if isinstance(reg_id, float) and math.isnan(reg_id):
-#      return
-#    if isinstance(mobile,float) and math.isnan(mobile):
-#      return
-#    elif isinstance(mobile,str):
-    else:
-      print(type(mobile))
-      phone_str = re.sub("[^0-9,+]+", '', mobile)
-      phone_list = phone_str.split(',')
-      #print(phone_list)
-      for phone in phone_list:
-        if len(phone) > 11:
-          if phone.startswith("+"):
-            if phone[0:-10] != "+91":
-              self.addKey(reg_id, phone[0:-10],"INT",20) 
-            phone = phone[-10:]
-        if len(phone) == 10:
-          #print("add key ", phone)
-          self.addKey(reg_id,phone,"MOB",50)
-          self.addKey(reg_id,phone[-4:],"MOBL4",20)
-
-
-  def teachNames(self, reg, names, type_prefix):
-    for i in range(len(names)):
-      #print(reg[i],names[i])
-      self.teachName(reg[i],names[i],type_prefix)
- 
-  def teachName(self, reg_id, name, type_prefix):
-    if isinstance(reg_id, float) and math.isnan(reg_id):
-      return
-    if isinstance(name,float) and math.isnan(name):
-      return
-    elif isinstance(name,str):
-      type = ""
-      confidence = 0
-      par = name.lower().split()
-      for j in range(len(par)):
-        if len(par[j]) > 2:
-          if type == "":
-            type = type_prefix + "FNAME"
-            confidence = 20
-          elif type == (type_prefix + "FNAME"):
-            type = type_prefix + "LNAME"
-            confidence = 10 
-          self.addKey(reg_id,par[j],type,confidence)
-     
-
-  def addKey(self, key, value,type, confidence):
-    if key not in keydb:
-      keydb[key]=[]
-    val = [value,type,confidence]
-    keydb[key].append(val)
-
-  def printKeyDB(self):
-    for key in keydb:
-      print(key)
-      for i in range(len(keydb[key])):
-        pass
-        print ("    " + str(keydb[key][i])) 
-
-  def teachEmails(self, reg, emails, type_prefix="" ):
-    for i in range(len(emails)):
-      self.teachEmail(reg[i],emails[i],type_prefix)
-
-  def teachEmail(self, reg_id, email, type_prefix):
-    if isinstance(reg_id, float) and math.isnan(reg_id):
-      return
-    if isinstance(email, float) and math.isnan(email):
-      return
-    elif isinstance(email, str):
-      type=""
-      confidence = 0
-      self.addKey(reg_id, email, "EMAIL", 50) 
-      id = email.lower().split('@')
-      ln = len(id[0])
-      if ln > 7:
-       ln = 7
-      self.addKey(reg_id, email[0:ln],"SEMAIL", 30)	  
-         
+    def __init__(self, filename: str, prefix: str = "", date: bool = True):
+        """
+        Initialize logger.
         
-class paytm():
-  def __init__(self, file, headers):
-    print("In paytm class")
-    self.transactions = {}
-    self.l = logger("paytmpayments", "paytm", False)
-    self.readPaytmTransactions(file, headers)
+        Args:
+            filename: Name of the log file
+            prefix: Prefix for log messages
+            date: Whether to include date in log messages
+        """
+        self.filename = filename
+        self.prefix = prefix
+        self.date = date
+        print(f"Starting {filename} log")
 
-  def readPaytmTransactions(self, file, headers):
-    print("In readPaytmTransactions")
-    data = pd.read_csv(file)
-    transaction_ids = pd.Series(data["Transaction_ID"]).tolist()
-    transaction_date = pd.Series(data["Transaction_Date"]).tolist()
-    nicknames = pd.Series(data["Customer_Nickname"]).tolist()
-    mobiles = pd.Series(data["Payment_Mobile_Number"]).tolist()
-    emails = pd.Series(data["Payment_Email_Id"]).tolist()
-    amounts = pd.Series(data["Amount"]).tolist()
-    cust_vpas = pd.Series(data["Customer_VPA"]).tolist()
-    comments = pd.Series(data["AdditionalComments"]).tolist()
-    for i in range(len(transaction_ids)):
-      #transaction = [str(transaction_ids[i]),str(transaction_date[i]),str(nicknames[i]),str(mobiles[i]),str(emails[i]),str(amounts[i]),str(cust_vpas[i]),str(comments[i])]
-      self.reconcileTransaction(transaction_ids[i], transaction_date[i],nicknames[i], mobiles[i], emails[i], amounts[i],cust_vpas[i],comments[i])
+    def log(self, message: str, *var_tuple: Any) -> None:
+        """
+        Log a message with optional additional variables.
+        
+        Args:
+            message: Main log message
+            *var_tuple: Additional variables to log
+        """
+        separator = "\t"
+        
+        if self.prefix:
+            message = f"{self.prefix}{separator}{message}"
+            
+        if self.date:
+            now = datetime.now()
+            dt_string = now.strftime("%Y/%m/%d %H:%M:%S")
+            message = f"{dt_string}{separator}{message}"
+            
+        for token in var_tuple:
+            if token is not None:
+                message = f"{message}{separator}{token}"
 
-  def printTransactions(self):
-    print(self.transactions)
 
-  def reconcileTransaction(self, transaction_id, transaction_date, nickname, mobile, email, amount, cust_vpa, comment):
-    #print(transaction_id, transaction_date, nickname, mobile, email, amount, cust_vpa, comment)
-    score = 0
-
-    ret  = self.findName(nickname)
-
-    if ret != None:
-      self.l.log(ret[0], ret[1], ret[2])
-      score = score  + ret[2]
-      transaction = [transaction_date,transaction_id,nickname,mobile,email,cust_vpa,comment,ret[2],amount]
-      if ret[0] not in self.transactions.keys():
-        self.transactions[ret[0]] = [score]
-      self.transactions[ret[0]][0] = score
-      self.transactions[ret[0]].append(transaction)
-      #print(self.transactions)
-
-    ret = self.findMobile(mobile)
-    if ret != None:
-      self.l.log(ret[0], ret[1], ret[2])
-      score = score + ret[2]
-      transaction = [transaction_date,transaction_id,nickname,mobile,email,cust_vpa,comment,ret[2],amount]
-      if ret[0] not in self.transactions.keys():
-        self.transactions[ret[0]] = [score]
-      self.transactions[ret[0]][0]=score
-      self.transactions[ret[0]].append(transaction)
-      #print(self.transactions)
-
-    ret = self.findEmail(email)
-    if len(ret) > 0:
-      match = 0
-      points = 0
-      for i in range(len(ret)):
-        if ret[i][1] > points:
-          points = ret[i][1]
-          match = ret[i]
-      self.l.log(match)
-      print("---------",match)
-      score = score + points
-      transaction = [transaction_date,transaction_id,nickname,mobile,email,cust_vpa,comment,score,amount]
-      if match[0] not in self.transactions.keys():
-        self.transactions[match[0]] = [score]
-      self.transactions[match[0]][0] = score
-      self.transactions[match[0]].append(transaction)
+class Registration:
+    """Handle student registration data and build key database."""
     
-    ret = self.findCustomerVPA(cust_vpa)
-    if len(ret) > 0:
-      match = 0
-      points = 0
-      for i in range(len(ret)):
-        if ret[i][1] > points:
-          points = ret[i][1]
-          match = ret[i]
-      self.l.log(match)
-      print("---------",match)
-      score = score + points
-      transaction = [transaction_date,transaction_id,nickname,mobile,email,cust_vpa,comment,score,amount]
-      if match[0] not in self.transactions.keys():
-        self.transactions[match[0]] = [score]
-      self.transactions[match[0]][0] = score
-      self.transactions[match[0]].append(transaction)
+    def __init__(self, file_path: str, headers: str):
+        """
+        Initialize registration processor.
+        
+        Args:
+            file_path: Path to registration CSV file
+            headers: CSV headers (unused but kept for compatibility)
+        """
+        print("Code Flow: utils - In init")
+        self.attr = 0
+        self._read_registration_csv_to_table(file_path, headers)
 
-    ret = self.findComments(comment)
-    if len(ret) > 0:
-      match = 0
-      points = 0
-      for i in range(len(ret)):
-        if ret[i][1] > points:
-          points = ret[i][1]
-          match = ret[i]
-      self.l.log(match)
-      print("---------",match)
-      score = score + points
-      transaction = [transaction_date,transaction_id,nickname,mobile,email,cust_vpa,comment,score,amount]
-      if match[0] not in self.transactions.keys():
-        self.transactions[match[0]] = [score]
-      self.transactions[match[0]][0] = score
-      self.transactions[match[0]].append(transaction)  
+    def _read_registration_csv_to_table(self, file_path: str, headers: str) -> None:
+        """
+        Read registration CSV and populate key database.
+        
+        Args:
+            file_path: Path to CSV file
+            headers: CSV headers (unused but kept for compatibility)
+        """
+        print("Code Flow: utils - Reading CSV")
+        
+        # Define data types for consistent reading
+        dtype_mapping = {
+            "SL.NO": str,
+            "STUDENTS NAME": str, 
+            "PARENTS NAME": str,
+            "MOBILE NUM": str,
+            "ALTERNATIVE NUM": str,
+            "E.M@IL": str
+        }
+        
+        data = pd.read_csv(file_path, dtype=dtype_mapping)
 
+        # Extract columns as lists
+        reg_ids = data["SL.NO"].tolist()
+        student_names = data['STUDENTS NAME'].tolist()
+        parent_names = data["PARENTS NAME"].tolist()
+        mobile_numbers = data["MOBILE NUM"].tolist()
+        alternate_numbers = data["ALTERNATIVE NUM"].tolist()
+        email_addresses = data["E.M@IL"].tolist()
+
+        # Process different data types
+        self._teach_names(reg_ids, student_names, "")
+        self._teach_names(reg_ids, parent_names, "P_")
+        self._teach_mobiles(reg_ids, mobile_numbers)
+        self._teach_mobiles(reg_ids, alternate_numbers)
+        self._teach_emails(reg_ids, email_addresses)
+
+    def _teach_mobiles(self, reg_ids: List[str], mobiles: List[str]) -> None:
+        """
+        Process mobile numbers for all registrations.
+        
+        Args:
+            reg_ids: List of registration IDs
+            mobiles: List of mobile numbers
+        """
+        for i in range(len(mobiles)):
+            self._teach_mobile(reg_ids[i], mobiles[i])
+
+    def _teach_mobile(self, reg_id: str, mobile: str) -> None:
+        """
+        Process a single mobile number and add to key database.
+        
+        Args:
+            reg_id: Registration ID
+            mobile: Mobile number string
+        """
+        if pd.isna(reg_id) or pd.isna(mobile):
+            return
+            
+        # Clean phone number string
+        phone_str = re.sub("[^0-9,+]+", '', mobile)
+        phone_list = phone_str.split(',')
+        
+        for phone in phone_list:
+            if len(phone) > 11:
+                # Handle international numbers
+                if phone.startswith("+") and phone[:-10] != "+91":
+                    self._add_key(reg_id, phone[:-10], "INT", 20)
+                phone = phone[-10:]  # Get last 10 digits
+                
+            if len(phone) == 10:
+                self._add_key(reg_id, phone, "MOB", 50)
+                self._add_key(reg_id, phone[-4:], "MOBL4", 20)
+
+    def _teach_names(self, reg_ids: List[str], names: List[str], 
+                    type_prefix: str) -> None:
+        """
+        Process names for all registrations.
+        
+        Args:
+            reg_ids: List of registration IDs
+            names: List of names
+            type_prefix: Prefix for name types (e.g., "P_" for parent)
+        """
+        for i in range(len(names)):
+            self._teach_name(reg_ids[i], names[i], type_prefix)
+
+    def _teach_name(self, reg_id: str, name: str, type_prefix: str) -> None:
+        """
+        Process a single name and add to key database.
+        
+        Args:
+            reg_id: Registration ID
+            name: Name string
+            type_prefix: Prefix for name type
+        """
+        if pd.isna(reg_id) or pd.isna(name):
+            return
+            
+        if isinstance(name, str):
+            name_type = ""
+            confidence = 0
+            
+            for j, part in enumerate(name.lower().split()):
+                if len(part) > 2:
+                    if name_type == "":
+                        name_type = f"{type_prefix}FNAME"
+                        confidence = 20
+                    elif name_type == f"{type_prefix}FNAME":
+                        name_type = f"{type_prefix}LNAME"
+                        confidence = 10
+                    self._add_key(reg_id, part, name_type, confidence)
+
+    def _add_key(self, key: str, value: str, key_type: str, 
+                confidence: int) -> None:
+        """
+        Add a key-value pair to the global key database.
+        
+        Args:
+            key: Registration ID
+            value: Value to store
+            key_type: Type of the value
+            confidence: Confidence score
+        """
+        if key not in KEY_DB:
+            KEY_DB[key] = []
+        KEY_DB[key].append([value, key_type, confidence])
+
+    def print_key_db(self) -> None:
+        """Print the entire key database for debugging."""
+        for key in KEY_DB:
+            print(key)
+            for entry in KEY_DB[key]:
+                print(f"    {entry}")
+
+    def _teach_emails(self, reg_ids: List[str], emails: List[str], 
+                     type_prefix: str = "") -> None:
+        """
+        Process email addresses for all registrations.
+        
+        Args:
+            reg_ids: List of registration IDs
+            emails: List of email addresses
+            type_prefix: Prefix for email types (unused)
+        """
+        for i in range(len(emails)):
+            self._teach_email(reg_ids[i], emails[i], type_prefix)
+
+    def _teach_email(self, reg_id: str, email: str, type_prefix: str) -> None:
+        """
+        Process a single email address and add to key database.
+        
+        Args:
+            reg_id: Registration ID
+            email: Email address
+            type_prefix: Prefix for email type (unused)
+        """
+        if pd.isna(reg_id) or pd.isna(email):
+            return
+            
+        self._add_key(reg_id, email, "EMAIL", 50)
+        
+        # Extract username part of email (up to 7 characters)
+        username_length = min(len(email.split('@')[0]), 7)
+        self._add_key(reg_id, email[:username_length], "SEMAIL", 30)
+
+
+class TransactionMatcher:
+    """Match transaction records with registration data."""
     
+    def __init__(self, file_path: str, headers: str, source: str = "Paytm"):
+        """
+        Initialize transaction matcher.
+        
+        Args:
+            file_path: Path to transaction CSV file
+            headers: CSV headers (unused but kept for compatibility)
+            source: Source of transactions (Paytm or ICICI)
+        """
+        print(f"In {source} class")
+        self.transactions: Dict[str, List] = {}
+        self.confidence_breakdown: Dict[str, Dict[str, int]] = {}
+        self.logger = Logger(f"{source.lower()}payments", source.lower(), False)
+        self._read_transactions(file_path, headers, source)
 
-  def findName(self, name):
-    if not pd.isna(name):
-      for token in name.split():
-        for key in keydb:
-          for i in range(len(keydb[key])):
-            if self.compareStr(token, keydb[key][i][0] ):
-              return [key, keydb[key][i][1],keydb[key][i][2]]
-      return None
+    def _add_confidence_detail(self, reg_id: str, key_type: str, 
+                              confidence: int) -> None:
+        """
+        Add confidence detail for a registration ID.
+        
+        Args:
+            reg_id: Registration ID
+            key_type: Type of match
+            confidence: Confidence score
+        """
+        if reg_id not in self.confidence_breakdown:
+            self.confidence_breakdown[reg_id] = {}
+        if key_type not in self.confidence_breakdown[reg_id]:
+            self.confidence_breakdown[reg_id][key_type] = 0
+        self.confidence_breakdown[reg_id][key_type] += confidence
 
-  def findMobile(self, mobile):
-    if not pd.isna(mobile):
-      tokens=mobile.split("****")
-      for key in keydb:
-        print("+***********", key)
-        for i in range(len(keydb[key])):
-          if self.compareStr(tokens[1], keydb[key][i][0] ):
-            return [key, keydb[key][i][1],keydb[key][i][2]]
-      return None
+    def _read_transactions(self, file_path: str, headers: str, 
+                          source: str) -> None:
+        """
+        Read transaction CSV file and process records.
+        
+        Args:
+            file_path: Path to CSV file
+            headers: CSV headers (unused)
+            source: Source of transactions
+        """
+        print(f"In readTransactions for {source}")
+        data = pd.read_csv(file_path)
 
-  def findEmail(self, email):
-    ret_val = []
-    if not pd.isna(email):
-      user_name = email.split('@')[0].split("****")[0]
-      #tokens = user_name.split('!|#|$|%|&|\'|*|+|-|/|=|?|^|_|`|{|\|')
-      #print(tokens)
-      #print(keydb)
-      for key in keydb:
-        elements = []
-        element = []
-        for i in range(len(keydb[key])):
-          if self.hasStr(user_name, keydb[key][i][0] ):
-            element = [keydb[key][i][0], keydb[key][i][1],keydb[key][i][2]]
-            if len(elements) == 0:
-              elements.append(key)
-              elements.append(0)
-            elements[1] = elements[1] + keydb[key][i][2]
-          if len(element) > 0:
-            e = deepcopy(element)
-            elements.append(e)
-            element.clear()
-        if len(elements) > 0:
-          es = deepcopy(elements)  
-          ret_val.append(es)
-          elements.clear()
-    return ret_val
+        # Map ICICI columns to common schema
+        if source == "ICICI":
+            column_mapping = {
+                "Cheque. No./Ref. No.": "Transaction_ID",
+                "Transaction Date": "Transaction_Date",
+                "Transaction Remarks": "AdditionalComments",
+                "Deposit Amt (INR)": "Amount"
+            }
+            data.rename(columns=column_mapping, inplace=True)
 
-  def findCustomerVPA(self, customer_vpa):
-    ret_val = []
-    if not pd.isna(customer_vpa):
-      vpa = customer_vpa.split('@')[0]
-      for key in keydb:
-        elements = []
-        element = []
-        for i in range(len(keydb[key])):
-          print(vpa)
-          print(keydb[key][i][0])
-          if self.hasStr(vpa, keydb[key][i][0] ):
-            element = [keydb[key][i][0], keydb[key][i][1],keydb[key][i][2]]
-            if len(elements) == 0:
-              elements.append(key)
-              elements.append(0)
-            elements[1] = elements[1] + keydb[key][i][2]
-          if len(element) > 0:
-            e = deepcopy(element)
-            elements.append(e)
-            element.clear()
-        if len(elements) > 0:
-          es = deepcopy(elements)  
-          ret_val.append(es)
-          elements.clear()
-    return ret_val
+            # Add placeholder columns for ICICI
+            placeholder_columns = [
+                "Customer_Nickname", "Payment_Mobile_Number", 
+                "Payment_Email_Id", "Customer_VPA"
+            ]
+            for col in placeholder_columns:
+                data[col] = None
 
-  def findComments(self, comments):
-    ret_val = []
-    if not pd.isna(comments):
-      for key in keydb:
-        elements = []
-        element = []
-        for i in range(len(keydb[key])):
-          print(comments)
-          print(keydb[key][i][0])
-          if self.hasStr(comments, keydb[key][i][0] ):
-            element = [keydb[key][i][0], keydb[key][i][1],keydb[key][i][2]]
-            if len(elements) == 0:
-              elements.append(key)
-              elements.append(0)
-            elements[1] = elements[1] + keydb[key][i][2]
-          if len(element) > 0:
-            e = deepcopy(element)
-            elements.append(e)
-            element.clear()
-        if len(elements) > 0:
-          es = deepcopy(elements)  
-          ret_val.append(es)
-          elements.clear()
-    return ret_val
+        # Validate required columns
+        required_columns = [
+            "Transaction_ID", "Transaction_Date", "Customer_Nickname",
+            "Payment_Mobile_Number", "Payment_Email_Id", "Amount",
+            "Customer_VPA", "AdditionalComments"
+        ]
+        missing_columns = [c for c in required_columns if c not in data.columns]
+        if missing_columns:
+            raise KeyError(f"Missing columns in {source} file: {missing_columns}")
+
+        # Process each transaction
+        for i, row in data.iterrows():
+            self._reconcile_transaction(
+                row["Transaction_ID"],
+                row["Transaction_Date"],
+                row["Customer_Nickname"],
+                row["Payment_Mobile_Number"],
+                row["Payment_Email_Id"],
+                row["Amount"],
+                row["Customer_VPA"],
+                row["AdditionalComments"],
+                source
+            )
+
+    def _reconcile_transaction(self, transaction_id: str, transaction_date: str,
+                              nickname: str, mobile: str, email: str,
+                              amount: float, customer_vpa: str, comment: str,
+                              source: str) -> None:
+        """
+        Reconcile a single transaction with registration data.
+        
+        Args:
+            transaction_id: Unique transaction identifier
+            transaction_date: Date of transaction
+            nickname: Customer nickname
+            mobile: Mobile number
+            email: Email address
+            amount: Transaction amount
+            customer_vpa: Customer VPA
+            comment: Additional comments
+            source: Source of transaction
+        """
+        score = 0
+
+        # Match nickname (Paytm only)
+        name_match = self._find_name(nickname)
+        if name_match:
+            score += name_match[2]
+            self._add_confidence_detail(name_match[0], name_match[1], name_match[2])
+            self._store_transaction(
+                name_match[0], score, transaction_date, transaction_id,
+                nickname, mobile, email, customer_vpa, comment, amount, source
+            )
+
+        # Match masked mobile (Paytm only)
+        mobile_match = self._find_mobile(mobile)
+        if mobile_match:
+            score += mobile_match[2]
+            self._add_confidence_detail(mobile_match[0], mobile_match[1], mobile_match[2])
+            self._store_transaction(
+                mobile_match[0], score, transaction_date, transaction_id,
+                nickname, mobile, email, customer_vpa, comment, amount, source
+            )
+
+        # Match by email, VPA, and comments
+        all_matches = (self._find_email(email) + 
+                      self._find_customer_vpa(customer_vpa) + 
+                      self._find_comments(comment))
+        
+        for match in all_matches:
+            score += match[1]
+            self._add_confidence_detail(match[0], match[2], match[1])
+            self._store_transaction(
+                match[0], score, transaction_date, transaction_id,
+                nickname, mobile, email, customer_vpa, comment, amount, source
+            )
+
+    def _store_transaction(self, reg_id: str, score: int, transaction_date: str,
+                          transaction_id: str, nickname: str, mobile: str,
+                          email: str, customer_vpa: str, comment: str,
+                          amount: float, source: str) -> None:
+        """
+        Store a matched transaction.
+        
+        Args:
+            reg_id: Registration ID
+            score: Confidence score
+            transaction_date: Date of transaction
+            transaction_id: Transaction ID
+            nickname: Customer nickname
+            mobile: Mobile number
+            email: Email address
+            customer_vpa: Customer VPA
+            comment: Comments
+            amount: Transaction amount
+            source: Source of transaction
+        """
+        transaction_record = [
+            transaction_date, transaction_id, nickname, mobile, email,
+            customer_vpa, comment, score, amount, source
+        ]
+        
+        if reg_id not in self.transactions:
+            self.transactions[reg_id] = [score]
+        else:
+            existing_score = self.transactions[reg_id][0]
+            self.transactions[reg_id][0] = max(existing_score, score)
+            
+        self.transactions[reg_id].append(transaction_record)
+
+    def _find_name(self, name: str) -> Optional[Tuple[str, str, int]]:
+        """
+        Find registration ID by matching name.
+        
+        Args:
+            name: Name to search for
+            
+        Returns:
+            Tuple of (reg_id, match_type, confidence) or None
+        """
+        if not pd.isna(name):
+            for token in name.split():
+                for key in KEY_DB:
+                    for entry in KEY_DB[key]:
+                        if self._compare_strings(token, entry[0]):
+                            return (key, entry[1], entry[2])
+        return None
+
+    def _find_mobile(self, mobile: str) -> Optional[Tuple[str, str, int]]:
+        """
+        Find registration ID by matching masked mobile number.
+        
+        Args:
+            mobile: Mobile number (possibly masked)
+            
+        Returns:
+            Tuple of (reg_id, match_type, confidence) or None
+        """
+        if not pd.isna(mobile) and "****" in mobile:
+            tokens = mobile.split("****")
+            for key in KEY_DB:
+                for entry in KEY_DB[key]:
+                    if self._compare_strings(tokens[1], entry[0]):
+                        return (key, entry[1], entry[2])
+        return None
+
+    def _find_email(self, email: str) -> List[Tuple[str, int, str]]:
+        """
+        Find registration IDs by matching email.
+        
+        Args:
+            email: Email address
+            
+        Returns:
+            List of (reg_id, confidence, match_type) tuples
+        """
+        return self._find_generic_match(email, "SEMAIL")
+
+    def _find_customer_vpa(self, customer_vpa: str) -> List[Tuple[str, int, str]]:
+        """
+        Find registration IDs by matching customer VPA.
+        
+        Args:
+            customer_vpa: Customer VPA
+            
+        Returns:
+            List of (reg_id, confidence, match_type) tuples
+        """
+        return self._find_generic_match(customer_vpa, "SEMAIL")
+
+    def _find_comments(self, comments: str) -> List[Tuple[str, int, str]]:
+        """
+        Find registration IDs by matching comments.
+        
+        Args:
+            comments: Transaction comments
+            
+        Returns:
+            List of (reg_id, confidence, match_type) tuples
+        """
+        return self._find_generic_match(comments, "SEMAIL")
+
+    def _find_generic_match(self, field: str, 
+                           key_type: str) -> List[Tuple[str, int, str]]:
+        """
+        Find registration IDs by generic string matching.
+        
+        Args:
+            field: Field value to search
+            key_type: Type of key to match
+            
+        Returns:
+            List of (reg_id, confidence, match_type) tuples
+        """
+        matches = []
+        if not pd.isna(field):
+            token = field.split('@')[0].split("****")[0]
+            for key in KEY_DB:
+                for entry in KEY_DB[key]:
+                    if self._has_substring(token, entry[0]):
+                        matches.append((key, entry[2], entry[1]))
+        return matches
+
+    def _compare_strings(self, word1: str, word2: str) -> bool:
+        """
+        Compare two strings (case-insensitive exact match).
+        
+        Args:
+            word1: First string
+            word2: Second string
+            
+        Returns:
+            True if strings match exactly (case-insensitive)
+        """
+        return word1.lower() == word2.lower()
+
+    def _has_substring(self, word1: str, word2: str) -> bool:
+        """
+        Check if word2 is a substring of word1 (case-insensitive).
+        
+        Args:
+            word1: String to search in
+            word2: Substring to search for
+            
+        Returns:
+            True if word2 is found in word1
+        """
+        return word2.lower() in word1.lower()
+
+    def _get_student_name(self, reg_id: str) -> str:
+        """
+        Get formatted student name from registration ID.
+        
+        Args:
+            reg_id: Registration ID
+            
+        Returns:
+            Formatted student name or registration ID if no name found
+        """
+        first_name = ""
+        last_name = ""
+        
+        if reg_id in KEY_DB:
+            for entry in KEY_DB[reg_id]:
+                if entry[1] == "FNAME":
+                    first_name = entry[0].capitalize()
+                elif entry[1] == "LNAME":
+                    last_name = entry[0].capitalize()
+                    
+        full_name = f"{first_name} {last_name}".strip()
+        return full_name if full_name else reg_id
+
+    def print_final_report(self, output_file: str = "final_report.csv") -> None:
+        """
+        Generate and print final reconciliation report.
+        
+        Args:
+            output_file: Output CSV file name
+        """
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        output_file = f"final_report_{timestamp}.csv"
+        rows = []
+        
+        for reg_id, entries in self.transactions.items():
+            score = entries[0]
+            student_name = self._get_student_name(reg_id)
+            confidence_detail = self.confidence_breakdown.get(reg_id, {})
+
+            for transaction in entries[1:]:
+                row = {
+                    "Student Name": student_name,
+                    "Registration ID": reg_id,
+                    "Transaction ID": transaction[1],
+                    "Transaction Date": transaction[0],
+                    "Nickname": transaction[2],
+                    "Mobile": transaction[3],
+                    "Email": transaction[4],
+                    "Customer VPA": transaction[5],
+                    "Comments": transaction[6],
+                    "Amount (₹)": transaction[8],
+                    "Confidence Score": score,
+                    "Confidence Breakdown": str(confidence_detail),
+                    "Source": transaction[9]
+                }
+                rows.append(row)
+
+        df = pd.DataFrame(rows)
+        df.to_csv(output_file, index=False, encoding='utf-8-sig')
+        print(f"\nReport successfully written to {output_file}")
 
 
+def main() -> None:
+    """Main function to run the transaction reconciler."""
+    parser = argparse.ArgumentParser(
+        description="Reconcile Paytm, ICICI, and Registration data."
+    )
+    parser.add_argument(
+        "--registration", 
+        required=True, 
+        help="Path to registration CSV file"
+    )
+    parser.add_argument(
+        "--paytm", 
+        required=True, 
+        help="Path to Paytm CSV file"
+    )
+    parser.add_argument(
+        "--icici", 
+        required=True, 
+        help="Path to ICICI CSV file"
+    )
 
-  def compareStr(self, word1, word2):
-    #print(word1, word2)
-    if word1.lower() == word2.lower():
-      return True
-    return False
+    args = parser.parse_args()
 
-  def hasStr(self, word1, word2):
-    print(word1, word2)
-    if word1.lower().find(word2.lower()) != -1:
-      return True
-    return False
+    # Initialize with empty headers (kept for compatibility)
+    headers = ""
+    
+    # Process registration data
+    registration_processor = Registration(args.registration, headers)
+    registration_processor.print_key_db()
 
-#f="/home/raveendra/software/tests/registration.csv"
-#f="/home/crj/code/shrine_reconciliation/registration.csv"
-f="registration.csv"
-g=""
-r = registration(f,g)
-r.printKeyDB()
+    # Process transaction data
+    transaction_matcher = TransactionMatcher(args.paytm, headers, source="Paytm")
+    transaction_matcher._read_transactions(args.icici, headers, source="ICICI")
+    transaction_matcher.print_final_report("final_report.csv")
 
-paytmfile = "AprilPaytm.csv"
-paytmdata = paytm(paytmfile, g)
-paytmdata.printTransactions()
 
+if __name__ == "__main__":
+    main()
